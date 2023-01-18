@@ -11,22 +11,19 @@ import scala.util.Try
 class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
 
   private val connectionFactory: ConnectionFactory = if (settings.enablePool) {
-    settings.pool.initialize()
-    logger.info(s"Connection pool initialized successfully")
+    settings.pooledConnectionFactory.initialize()
     settings.pooledConnectionFactory
   } else {
     settings.defaultConnectionFactory
   }
 
-  def closePool(): Unit = connectionFactory match {
-    case cf: PooledConnectionFactory =>
-      logger.info("Closing connection pool")
-      cf.getConnectionPool.close()
-    case _ => //Nothing to do
+  def closePool(): Unit = {
+    logger.info("Closing connection pool")
+    connectionFactory.close()
   }
 
   private def logAvailableConnectionsInPool: String = connectionFactory match {
-    case cf: PooledConnectionFactory => s"${cf.getConnectionPool.availableCount()} connections available"
+    case cf: PooledConnectionFactory => s"${cf.availableCount()} connections available"
     case _ => "" //Nothing to do
   }
 
@@ -81,20 +78,6 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
     result.toSeq
   }
 
-  private def withConnection[R](f: Connection => Future[R])(implicit ex: ExecutionContext): Future[R] = {
-    logger.debug(s"$logAvailableConnectionsInPool - obtaining connection")
-    Future(connectionFactory.getConnection).flatMap { connection =>
-      val operation = Try {
-        if (!connection.isOpen) {
-          logger.debug("Connection opened")
-          connection.open()
-        }
-        f(connection)
-      }.fold(Future.failed, identity)
-      operation.onComplete(_ => closeConnection(connection))
-      operation
-    }
-  }
 
   /**
     * Add a new entry to Ldap, using a connection. If an equal entry already exists, nothing is done. Otherwise, the
@@ -109,20 +92,17 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
   def addEntry(dn: String = "", textAttributes: Map[String, List[String]] = Map.empty,
                binaryAttributes: Map[String, List[Array[Byte]]] = Map.empty)(implicit ex: ExecutionContext): Future[Unit] = {
     val ldapAttributes = toLdapAttributes(textAttributes, binaryAttributes)
-    withConnection { connection =>
-      logger.info(s"Adding ${appendBaseDn(dn)}")
-      val operation = new AddOperation(connection)
-
-      //    addOperationHandler(operation)
+    val operation = new AddOperation(connectionFactory)
       Future {
+        logger.info(s"Adding ${appendBaseDn(dn)}")
         operation.execute(new AddRequest(appendBaseDn(dn), ldapAttributes.asJavaCollection))
-        closeConnection(connection) // This must be here!
-      }.recoverWith {
-        case ldapException: LdapException if ldapException.getResultCode == ResultCode.ENTRY_ALREADY_EXISTS =>
-          closeConnection(connection) // This must be here!
-          replaceAttributes(dn, textAttributes, binaryAttributes)
+      }.flatMap { r =>
+        r.getResultCode match {
+          case ResultCode.ENTRY_ALREADY_EXISTS => replaceAttributes(dn, textAttributes, binaryAttributes)
+          case ResultCode.SUCCESS => Future.unit
+          case rc => Future.failed(LdapException(r))
+        }
       }
-    }
   }
 
   /**
@@ -132,13 +112,12 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
     * @param ex the execution context where the `Future` will be executed
     * @return   a `Future` wrapping the delete operation
     */
-  def deleteEntry(dn: String = "")(implicit ex: ExecutionContext): Future[Unit] = withConnection { connection =>
+  def deleteEntry(dn: String = "")(implicit ex: ExecutionContext): Future[Unit] = {
     logger.info(s"Deleting entry ${appendBaseDn(dn)}")
-    val operation = new DeleteOperation(connection)
-    //    addOperationHandler(operation)
+    val operation = new DeleteOperation(connectionFactory)
     Future {
       operation.execute(new DeleteRequest(appendBaseDn(dn)))
-      closeConnection(connection) // This must be here!
+      ()
     }.recoverWith {
       case ldapException: LdapException if ldapException.getResultCode == ResultCode.NO_SUCH_OBJECT => Future.unit
     }
@@ -149,7 +128,7 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
     val attributes = toLdapAttributes(textAttributes, binaryAttributes)
 
     val attributesModification: Seq[AttributeModification] = attributes.map { attribute =>
-      new AttributeModification(AttributeModificationType.ADD, attribute)
+      new AttributeModification(AttributeModification.Type.ADD, attribute)
     }
 
     executeModifyOperation(dn, attributesModification)(s"Adding attributes for ${appendBaseDn(dn)}")
@@ -159,7 +138,7 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
                         binaryAttributes: Map[String, List[Array[Byte]]])(implicit ex: ExecutionContext): Future[Unit] = {
     val attributes = toLdapAttributes(textAttributes, binaryAttributes)
     val attributesModification: Seq[AttributeModification] = attributes.map { attribute =>
-      new AttributeModification(AttributeModificationType.REPLACE, attribute)
+      new AttributeModification(AttributeModification.Type.REPLACE, attribute)
     }
 
     executeModifyOperation(dn, attributesModification)(s"Replacing attributes for ${appendBaseDn(dn)}")
@@ -167,7 +146,7 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
 
   def removeAttributes(dn: String = "", attributes: Seq[String])(implicit ex: ExecutionContext): Future[Unit] = {
     val attributesModification: Seq[AttributeModification] = attributes.map { attribute =>
-      new AttributeModification(AttributeModificationType.REMOVE, new LdapAttribute(attribute))
+      new AttributeModification(AttributeModification.Type.DELETE, new LdapAttribute(attribute))
     }
 
     executeModifyOperation(dn, attributesModification)(s"Removing ${attributes.mkString(", ")} attributes for ${appendBaseDn(dn)}")
@@ -175,38 +154,28 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
 
   private def executeModifyOperation(dn: String, attributes: Seq[AttributeModification])
                                     (logMessage: String)
-                                    (implicit ex: ExecutionContext): Future[Unit] = withConnection { connection =>
+                                    (implicit ex: ExecutionContext): Future[Unit] = {
     logger.info(logMessage)
-    val operation = new ModifyOperation(connection)
-    //      addOperationHandler(operation)
-    Future {
-      operation.execute(new ModifyRequest(appendBaseDn(dn), attributes: _*))
-      closeConnection(connection) // This must be here!
-    }
+    val operation = new ModifyOperation(connectionFactory)
+    Future(operation.execute(new ModifyRequest(appendBaseDn(dn), attributes: _*)))
   }
 
-  private def createSearchResult(dn: String, filter: String, attributes: Seq[String], size: Long)
-                                (implicit connection: Connection, ex: ExecutionContext): Future[SearchResult] = {
+  private def createSearchResult(dn: String, filter: String, attributes: Seq[String], size: Int)
+                                (implicit ex: ExecutionContext): Future[SearchResponse] = {
     val request = new SearchRequest(appendBaseDn(dn), filter, attributes: _*)
     request.setDerefAliases(DerefAliases.valueOf(settings.searchDereferenceAlias))
     request.setSearchScope(SearchScope.valueOf(settings.searchScope))
     request.setSizeLimit(size)
     request.setTimeLimit(settings.searchTimeLimit)
 
-    val operation: SearchOperation = new SearchOperation(connection)
-    //    addOperationHandler(operation)
-    Future {
-      val result = operation.execute(request).getResult
-      closeConnection(connection) // This must be here!
-      result
-    }
+    val operation: SearchOperation = new SearchOperation(connectionFactory)
+    Future(operation.execute(request))
   }
 
-  def search(dn: String = "", filter: String, returningAttributes: Seq[String] = Seq.empty, size: Long = settings.searchSizeLimit)
+  def search(dn: String = "", filter: String, returningAttributes: Seq[String] = Seq.empty, size: Int = settings.searchSizeLimit)
             (implicit ex: ExecutionContext): Future[Seq[Entry]] = {
     assert(size > -1, "The number of results expected should be a non-negative integer.")
     assert(filter.nonEmpty, "Filter cannot be empty.")
-    withConnection { implicit connection =>
       logger.info(s"Performing a search($size) for ${appendBaseDn(dn)}, with $filter and returning ${returningAttributes.mkString(", ")} attributes")
 
       createSearchResult(dn, filter, returningAttributes, size).map { result =>
@@ -219,7 +188,6 @@ class Ldap(val settings: Settings = new Settings()) extends LazyLogging {
         case ldapException: LdapException if ldapException.getResultCode == ResultCode.NO_SUCH_OBJECT =>
           Future(Seq.empty[Entry])
       }
-    }
   }
 
   def searchAll(dn: String = "", filter: String, returningAttributes: Seq[String] = Seq.empty)

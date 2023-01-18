@@ -19,7 +19,7 @@ class SerializationSpec extends UnitSpec {
           os.close()
 
           Assertions.succeed
-        }.getOrElse(Assertions.fail)
+        }.getOrElse(Assertions.fail())
       }
     }
 

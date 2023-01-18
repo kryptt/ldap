@@ -273,3 +273,9 @@ server.pid
 ### Vagrant ###
 .vagrant/
 
+.bsp/
+.metals/
+.env
+.bloop/
+.vscode/
+/project/metals.sbt

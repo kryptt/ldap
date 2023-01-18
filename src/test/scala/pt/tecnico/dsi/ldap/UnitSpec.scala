@@ -2,9 +2,11 @@ package pt.tecnico.dsi.ldap
 
 import com.typesafe.config.ConfigFactory
 import com.typesafe.scalalogging.LazyLogging
-import org.scalatest.{AsyncFlatSpec, Matchers, OptionValues, ParallelTestExecution}
+import org.scalatest.flatspec.AsyncFlatSpec
+import org.scalatest.matchers.should.Matchers
+import org.scalatest.{OptionValues, ParallelTestExecution}
 
-abstract class UnitSpec extends AsyncFlatSpec with Matchers with OptionValues with ParallelTestExecution
+abstract class UnitSpec extends AsyncFlatSpec with Matchers with OptionValues
   with LazyLogging {
 
   val simpleLdap = new Ldap()

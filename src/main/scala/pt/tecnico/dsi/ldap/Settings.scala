@@ -4,10 +4,9 @@ import java.security.{KeyStore, SecureRandom}
 import java.time.Duration
 import javax.net.ssl.SSLContext
 import com.typesafe.config.{Config, ConfigFactory}
-import com.unboundid.util.ssl.{SSLUtil, TrustStoreTrustManager}
+import com.unboundid.util.ssl.TrustStoreTrustManager
 import org.ldaptive._
 import org.ldaptive.pool._
-import org.ldaptive.provider.unboundid.{UnboundIDProvider, UnboundIDProviderConfig}
 import org.ldaptive.ssl.{KeyStoreCredentialConfig, SslConfig}
 import scala.jdk.CollectionConverters._
 
@@ -54,23 +53,19 @@ class Settings(config: Config = ConfigFactory.load()) {
   connectionConfig.setConnectTimeout(connectionTimeout)
   connectionConfig.setResponseTimeout(responseTimeout)
   connectionConfig.setUseStartTLS(false)
-  connectionConfig.setUseSSL(enableSSL)
-  connectionConfig.setConnectionInitializer(new BindConnectionInitializer(bindDN, credential))
+  connectionConfig.setConnectionInitializers(new BindConnectionInitializer(bindDN, credential))
 
   val keyStoreConfig = new KeyStoreCredentialConfig()
   keyStoreConfig.setTrustStore(s"file:/$trustStore")
   keyStoreConfig.setTrustStorePassword(trustStorePassword)
   keyStoreConfig.setTrustStoreType(KeyStore.getDefaultType)
 
+  if (enableSSL) {
   val sslConfig = new SslConfig()
   sslConfig.setCredentialConfig(keyStoreConfig)
   sslConfig.setEnabledProtocols(protocol)
   sslConfig.setEnabledCipherSuites(enabledAlgorithms: _*)
 
-  private val provider = new UnboundIDProvider()
-  private val providerConfig = new UnboundIDProviderConfig()
-
-  if (enableSSL) {
     val randomNumberGenerator = {
       val rng = randomNumberGeneratorAlgorithm match {
         case s@("SHA1PRNG" | "NativePRNG") =>
@@ -89,47 +84,25 @@ class Settings(config: Config = ConfigFactory.load()) {
       rng
     }
 
+    sslConfig.setTrustManagers(
+new TrustStoreTrustManager(trustStore, trustStorePassword.toCharArray, KeyStore.getDefaultType, true)
+    )
     connectionConfig.setSslConfig(sslConfig)
-    val sslUtil = new SSLUtil(new TrustStoreTrustManager(trustStore, trustStorePassword.toCharArray, KeyStore.getDefaultType, true))
-
-    val sslContext = SSLContext.getInstance(protocol)
-    sslContext.init(sslUtil.getKeyManagers, sslUtil.getTrustManagers, randomNumberGenerator)
-
-    providerConfig.setSSLSocketFactory(sslContext.getSocketFactory)
-    provider.setProviderConfig(providerConfig)
   }
 
-  val defaultConnectionFactory: DefaultConnectionFactory = new DefaultConnectionFactory(connectionConfig, provider)
+  val defaultConnectionFactory: DefaultConnectionFactory = new DefaultConnectionFactory(connectionConfig)
 
-  val poolConfig: PoolConfig = new PoolConfig()
-  poolConfig.setMinPoolSize(minPoolSize)
-  poolConfig.setMaxPoolSize(maxPoolSize)
+  val poolConfig = PooledConnectionFactory.builder()
+  .config(connectionConfig)
+  .min(minPoolSize)
+  .max(maxPoolSize)
+  .validateOnCheckOut(true)
+  .validatePeriodically(true)
 
-//  poolConfig.setValidateOnCheckIn(true)
-  poolConfig.setValidateOnCheckOut(true)
-
-  poolConfig.setValidatePeriodically(true)
-  poolConfig.setValidatePeriod(validationPeriod)
-
-  //TODO Say on documentations that if one wants to use a non blocking connection pool to extend this class an override
-  //     the proper val
-  val pool = new BlockingConnectionPool(poolConfig, defaultConnectionFactory)
-//  val pool = new SoftLimitConnectionPool()
-//  pool.setBlockWaitTime(blockWaitTime)
-  pool.setFailFastInitialize(true)
-  //Before connections are checked back into the pool a bind request will be made.
-  //This makes connections consistent with ConnectionInitializer from ConnectionConfig
-//  pool.setPassivator(new BindPassivator(new BindRequest(bindDN, credential)))
-  //SearchValidator - connection is valid if the search operation returns one or more results.
-  //Connections that fail validation are evicted from the pool.
-  pool.setValidator(new SearchValidator())
-  //Prunes connections from the pool based on how long they have been idle.
-  pool.setPruneStrategy(new IdlePruneStrategy(prunePeriod, pruneIdleTime))
-
-  val pooledConnectionFactory: PooledConnectionFactory = new PooledConnectionFactory(pool)
+  val pooledConnectionFactory: PooledConnectionFactory = poolConfig.build()
 
   val searchDereferenceAlias: String = searchConfigs.getString("dereference-alias")
   val searchScope: String = searchConfigs.getString("scope")
-  val searchSizeLimit: Long = searchConfigs.getLong("size-limit")
+  val searchSizeLimit: Int = searchConfigs.getInt("size-limit")
   val searchTimeLimit: Duration = searchConfigs.getDuration("time-limit")
 }

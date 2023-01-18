@@ -20,7 +20,7 @@ class AddSpec extends UnitSpec {
           entry.textValue(cn).value shouldBe janeDoe
           entry.textValue(sn).value shouldBe doe
           entry.textValue(telephoneNumber).value shouldBe number
-        }.getOrElse(Assertions.fail)
+        }.getOrElse(Assertions.fail())
       }
     }
 
@@ -46,7 +46,7 @@ class AddSpec extends UnitSpec {
           entry.textValue(cn) shouldBe Some(johnDoe)
           entry.textValue(sn) shouldBe Some(doe)
           entry.textValue(telephoneNumber) shouldBe Some(number)
-        }.getOrElse(Assertions.fail)
+        }.getOrElse(Assertions.fail())
       }
     }
 
@@ -73,7 +73,7 @@ class AddSpec extends UnitSpec {
           entry.textValue(sn) shouldBe Some(doe)
           entry.textValue(telephoneNumber) shouldBe Some(number)
           entry.textValue(description) shouldBe Some(descriptionValue)
-        }.getOrElse(Assertions.fail)
+        }.getOrElse(Assertions.fail())
       }
     }
 

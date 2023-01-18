@@ -12,7 +12,7 @@ class DeleteSpec extends UnitSpec {
   }
 
   it should "not fail when deleting a non existant entry" in {
-    val johnDoe = s"John $doe"
+    val johnDoe = s"JohnDel $doe"
 
     for {
       _ <- simpleLdap.deleteEntry(s"$cn=$johnDoe")
